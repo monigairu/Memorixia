@@ -1,8 +1,8 @@
 # マイルストーン計画: おでかけ記録×育成アプリ(仮称)
 
-- バージョン: 1.0(ドラフト)
-- 作成日: 2026-07-17
-- 前提: REQUIREMENT.md v1.2 / DATABASE.md / SCREEN.md / CHARACTERS.md に準拠
+- バージョン: 1.1(ドラフト)
+- 作成日: 2026-07-17 / 更新日: 2026-07-18
+- 前提: REQUIREMENT.md v1.4 / DATABASE.md / SCREEN.md / CHARACTERS.md に準拠
 - 開発体制: 個人開発、週10〜15時間(平日夜+週末)
 - 進め方: **縦切り** — 機能を1本ずつE2Eで貫通させ、各マイルストーン末に実機で動くものがある状態を保つ
 
@@ -34,7 +34,7 @@
 |---|---|
 | やること | Expoプロジェクト作成(TypeScript)/ Supabaseプロジェクト作成 / react-native-mapsセットアップ / GitHub Actions(lint+typecheck)/ 実機ビルド確認 |
 | 完了条件 | iOS/Android実機でGoogle Mapsが表示される空アプリが起動する |
-| 注意 | **react-native-mapsはExpo Goでは動かない**。最初からdev build(expo-dev-client)前提で構築する。Google Maps API키の取得と課金アラート設定(無料枠の最新体系確認 — REQUIREMENT 7章の残件)もここで行う |
+| 注意 | **react-native-mapsはExpo Goでは動かない**。最初からdev build(expo-dev-client)前提で構築する。Google Maps APIキーの取得と課金アラート設定(無料枠の最新体系確認 — REQUIREMENT 7章の残件)もここで行う。**APIキーには必ずアプリ制限(iOSバンドルID / Androidパッケージ名+SHA-1)・API制限・クォータ上限を設定する**(クライアント埋め込みキーの抽出→不正利用による課金事故の防止) |
 
 ### M1 DB基盤+認証+オンボーディング(2週)
 
@@ -125,4 +125,4 @@
 - 旅ログ自動生成・シェア画像(v2)
 - 閲覧専用Web版(v2)
 - ★2〜★4の本絵差し替え(v1は仮絵で可。リリース後にP1→P2の順で差し替え)
-- 位置偽装の厳密対策・外部分析基盤・一般公開向け法務整備
+- 位置偽装の厳密対策・POIメタデータのサーバー側照会(チェックインのEdge Function化。一般公開の前提条件 — REQUIREMENT 12章)・外部分析基盤・一般公開向け法務整備

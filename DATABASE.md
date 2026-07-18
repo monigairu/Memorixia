@@ -1,8 +1,8 @@
 # DB設計書: おでかけ記録×育成アプリ(仮称)
 
-- バージョン: 1.0(ドラフト)
-- 作成日: 2026-07-17
-- 前提: REQUIREMENT.md v1.2 に準拠。Supabase(PostgreSQL 15+ / PostGIS / Auth / Storage / RLS)
+- バージョン: 1.2(ドラフト)
+- 作成日: 2026-07-17 / 更新日: 2026-07-18
+- 前提: REQUIREMENT.md v1.4 に準拠。Supabase(PostgreSQL 15+ / PostGIS / Auth / Storage / RLS)
 
 ---
 
@@ -205,6 +205,7 @@ create table public.checkins (
   awarded_character_id  uuid references public.characters_master(id),
   awarded_snack_rank    int,                        -- 被り時のみ
   applied_bonus         text,                       -- 'km300' / 'first_city' 等(適用した1つ)
+  deleted_at            timestamptz,                -- 論理削除(delete_checkin RPC。表示クエリは deleted_at is null でフィルタ)
   created_at            timestamptz not null default now()
 );
 create index idx_checkins_user_date on public.checkins (user_id, local_date);
@@ -293,7 +294,7 @@ create index idx_events_type_date on public.events (event_type, created_at);
 | spaces / space_members | 所属メンバー | トリガー/RPCのみ | ownerのみ(name) | RPCのみ |
 | genres, genre_mapping, spot_rarity_overrides, characters_master, snack_ranks, evolution_rules, rarity_weights, distance_bonus_rules, badges | 認証済み全員 | 不可(service roleのみ) | 不可 | 不可 |
 | spots | 認証済み全員 | RPCのみ | RPCのみ(POI解決) | 不可 |
-| checkins | 所属スペースのメンバー | **RPCのみ** | **RPCのみ** | 本人(記録の削除は許可) |
+| checkins | 所属スペースのメンバー | **RPCのみ** | **RPCのみ** | **RPCのみ**(delete_checkinによる論理削除。物理DELETE不可) |
 | albums | 所属スペースのメンバー | 本人(user_id = auth.uid()) | 本人 | 本人 |
 | user_characters, user_snacks, user_badges | 本人のみ | **RPCのみ** | **RPCのみ** | cascade |
 | events | 本人のみ | 本人(user_id = auth.uid()) | 不可 | 不可 |
@@ -317,7 +318,7 @@ create policy genres_select on public.genres for select to authenticated using (
 
 **「RPCのみ」の実現方法**: 該当テーブルにINSERT/UPDATEポリシーを作成しない(RLSのデフォルト拒否)。書き込みはすべて `security definer` 関数内で行うため、RLSをバイパスして安全に実行できる。関数自体は `grant execute to authenticated` で公開する。
 
-**チェックイン削除の注意**: 削除してもXP・キャラは剥奪しない(記録の削除は思い出管理の操作であり、ゲーム状態の巻き戻しは複雑化に見合わない)。悪用経路は「1日1回」判定が checkins の存在に依存する点だが、削除→再チェックインしても `client_id` 冪等化と `local_date` 判定はRPC内で削除済み分を含めて判定する設計にする(7章 実装メモ参照)。
+**チェックイン削除の注意**: 削除は `delete_checkin` RPC(5.9)による論理削除のみとし、クライアントからの物理DELETEは許可しない(DELETEポリシーを作らない=デフォルト拒否)。削除してもXP・キャラは剥奪しない(記録の削除は思い出管理の操作であり、ゲーム状態の巻き戻しは複雑化に見合わない)。悪用経路は「1日1回」判定が checkins の存在に依存する点だが、論理削除のため削除→再チェックインしても `client_id` 冪等化と `local_date` 判定は削除済み行を含めて判定できる(7章 実装メモ参照)。
 
 ---
 
@@ -339,7 +340,10 @@ create policy genres_select on public.genres for select to authenticated using (
 process_checkin(
   p_client_id   uuid,      -- 冪等キー
   p_place_id    text,      -- POIスナップ時。手動入力時はnull
-  p_spot_name   text,      -- 手動入力時のスポット名
+  p_place_types text[],    -- POIのplace type一覧(クライアント申告。v1割り切り→下記)
+  p_prefecture  text,      -- 住所コンポーネント: 都道府県(同上)
+  p_city        text,      -- 住所コンポーネント: 市区町村(同上)
+  p_spot_name   text,      -- スポット名(POI名 / 手動入力名)
   p_lat/p_lng   double,    -- チェックイン時のGPS座標
   p_photo_path  text,
   p_tags        text[],
@@ -353,8 +357,13 @@ process_checkin(
 処理フロー:
 
 ```
-1. 冪等チェック
-   client_idが既存 → 保存済みの結果jsonbを返して終了(オフライン再送対策)
+1. 入力検証・冪等チェック
+   - p_photo_pathが 'photos/{auth.uid()}/{p_client_id}.jpg' 形式であることを検証
+     (他ユーザーの写真パスの紐付けを防止)
+   - p_tags・p_memoにサーバー側で簡易NGワードフィルタを適用(REQUIREMENT 4章)
+   - 冪等判定は client_id × user_id の複合で行う:
+     自分のclient_idが既存 → 保存済みの結果jsonbを返して終了(オフライン再送対策)
+     他ユーザーのclient_idと衝突 → 結果は返さずエラー(結果jsonbの情報漏えい防止)
 
 2. 上限チェック
    同一user_id × local_dateのチェックイン数 >= 10 → エラー 'daily_limit_exceeded'
@@ -362,8 +371,9 @@ process_checkin(
 3. スポット解決
    a. p_place_idあり:
       - spotsをplace_idでupsert
-      - genre_mapping(複数typeはレア度最高の系統を優先)+ spot_rarity_overridesで系統・レア度確定
-      - prefecture / city を保存
+      - p_place_typesを全ルックアップしgenre_mapping(複数typeはレア度最高の系統を優先)
+        + spot_rarity_overridesで系統・レア度確定
+      - p_prefecture / p_city を保存
    b. p_place_idなし(手動入力):
       - place_id=nullのspotを作成、genre/rarity未確定
       - lottery_status='pending'のままチェックインを保存して終了
@@ -403,11 +413,16 @@ process_checkin(
     結果jsonb(獲得キャラ/おやつ、XP、適用ボーナス、新バッジ)を返す
 ```
 
+**POIメタデータのv1割り切り(REQUIREMENT 4章・12章)**: p_place_types・p_prefecture・p_city・座標はクライアントがPlaces APIから取得して申告する値であり、改ざん可能(place type偽装による高レア詐取が理論上可能)。PostgreSQL関数からは外部APIを呼べないため、v1(身内配布)ではこれを許容する。一般公開時はチェックイン経路をEdge Function化し、place_idからのPlace Details照会をサーバー側で行う構成に移行する(一般公開の前提条件)。
+
 ### 5.3 resolve_manual_checkin(p_checkin_id, p_place_id)
 
 手動入力チェックインのPOI解決後に呼ぶ:
-1. spotsのplace_id・genre・rarity・prefecture・cityを確定(既存spotとplace_idが一致する場合は統合)
-2. `process_checkin` のステップ4〜10と同じ報酬処理を実行(判定は元のlocal_date基準)
+1. 所有権チェック(対象checkinの user_id = auth.uid())
+2. spotsのplace_id・genre・rarity・prefecture・cityを確定(既存spotとplace_idが一致する場合は統合)
+3. `process_checkin` のステップ4〜10と同じ報酬処理を実行(判定は元のlocal_date基準)
+
+**呼び出しポリシー(自動解決優先)**: 電波復帰後、クライアントが保存済みGPS座標+スポット名でPlaces APIテキスト検索(位置バイアス付き)を自動実行し、候補が一意に定まれば本関数を自動で呼ぶ。候補が複数・0件の場合のみ、ユーザーがスポット詳細(SCREEN.md S-11)の「キャラ抽選待ち」バッジから候補を選択して解決する(REQUIREMENT 4章)。
 
 ### 5.4 feed_snacks(p_user_character_id, p_rank, p_quantity)
 
@@ -432,7 +447,20 @@ process_checkin(
 1. `home_area_updated_at` が90日以内ならエラー 'cooldown_active'(初回設定は制限なし)
 2. home_location更新、home_area_updated_at = now()
 
-### 5.8 delete-account(Edge Function)
+### 5.8 update_checkin_note(p_checkin_id, p_tags, p_memo)
+
+タグ・メモの後から追記(SCREEN.md S-15の任意追記・S-11の記録編集):
+1. 所有権チェック(user_id = auth.uid())
+2. p_tags・p_memoにサーバー側で簡易NGワードフィルタを適用(5.2ステップ1と同一の処理)
+3. checkinsのtags・memoを更新(ゲーム状態には影響しない)
+
+### 5.9 delete_checkin(p_checkin_id)
+
+1. 所有権チェック(user_id = auth.uid())
+2. `deleted_at = now()` を設定(物理DELETEはしない。7章 実装メモ1)
+3. XP・キャラ・おやつは剥奪しない(4章「チェックイン削除の注意」)
+
+### 5.10 delete-account(Edge Function)
 
 `auth.users` の削除にはservice roleが必要なためEdge Functionで実装:
 1. Storage `photos/{user_id}/` 配下の全オブジェクトを削除
@@ -454,7 +482,7 @@ process_checkin(
 
 ## 7. 実装メモ・注意点
 
-1. **「削除済みを含めた1日1回判定」**: checkinsの物理削除を許可すると、削除→再チェックインでXP二重取りが可能になる。対策として checkins の削除は物理DELETEではなく `deleted_at` による論理削除とし、報酬判定(5.2ステップ4)は `deleted_at` を無視して全行を対象にする。地図・一覧の表示クエリは `deleted_at is null` でフィルタする
+1. **「削除済みを含めた1日1回判定」**: checkinsの物理削除を許可すると、削除→再チェックインでXP二重取りが可能になる。対策として checkins の削除は物理DELETEではなく `delete_checkin` RPC(5.9)による `deleted_at` の論理削除とし、報酬判定(5.2ステップ4)は `deleted_at` を無視して全行を対象にする。地図・一覧の表示クエリは `deleted_at is null` でフィルタする
 2. **複数place typeのレア度優先**: Places APIは1POIに複数typeを返す。`genre_mapping` を全typeでルックアップし、rarityが最大の行の系統を採用する(REQUIREMENT F-05)
 3. **rarity_weightsの検証**: band別の合計が100になることをシード投入時にCHECKする(合計100%=毎回必ず抽選結果が出る前提を守る)
 4. **PostGISの距離計算**: `geography` 型の `ST_Distance` はメートル単位を返すため、band判定は `>= min_distance_km * 1000` で行う
