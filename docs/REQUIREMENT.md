@@ -170,7 +170,7 @@
 |---|---|---|
 | フロント | Expo(React Native)+ TypeScript | iOS/Android 単一コード(Webはv1対象外。4章) |
 | 地図 | react-native-maps(Google Maps SDK) | 品質重視で Google 採用。Web非対応のためWeb版を作る場合は別実装が必要 |
-| POI・ジャンル | Google Places API | POIスナップ、place type 取得 |
+| POI・ジャンル | Google Places API (New) | POIスナップ、place type 取得。旧Places APIはメンテナンスモードのため新規実装は(New)を採用。Field Maskで必要項目のみ取得しコストを抑制(7章) |
 | BaaS | Supabase(PostgreSQL + PostGIS / Auth / Storage / RLS) | 抽選・XP計算はPostgreSQL関数/Edge Functionでサーバー側実行(4章)。それ以外のバックエンドコードは最小化 |
 | キャラ画像 | 基準1枚を確定→AI生成で展開 | 初期規模52種(13系統×4レア度)×3進化段階=計156アセット。後から差し替え前提 |
 | 将来のAPI層 | FastAPI(必要になった時点で追加) | 旅ログ自動生成など重い処理用 |
